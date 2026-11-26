@@ -2,5 +2,5 @@ id=duchamp_gzvm
 name=GenieZone for duchamp
 version=0.2.0-dev
 versionCode=2
-author=duchamp-gzvm contributors
+author=chenmiaoming
 description=Enable GenieZone on the supported duchamp firmware with matching gzvm and platform modules.
