@@ -87,7 +87,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    concurrency: publish-${{ github.ref }}
+    concurrency: publish-${{ contains(github.ref_name, '-') && 'prerelease' || github.ref }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -101,9 +101,41 @@ jobs:
           PACKAGE: ${{ needs.package.outputs.filename }}
         run: |
           sha256sum --check "$PACKAGE.sha256"
+          is_prerelease=false
           release_flags=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            is_prerelease=true
             release_flags+=(--prerelease)
           fi
-          gh release create "$GITHUB_REF_NAME" "$PACKAGE" "$PACKAGE.sha256" \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${release_flags[@]}"
+          if published=$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease 2>/dev/null); then
+            jq -e --argjson prerelease "$is_prerelease" \
+              '.isDraft == false and .isPrerelease == $prerelease' <<< "$published" >/dev/null
+            published_dir=$(mktemp -d)
+            gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+              --pattern "$PACKAGE" --pattern "$PACKAGE.sha256" --dir "$published_dir"
+            cmp "$PACKAGE.sha256" "$published_dir/$PACKAGE.sha256"
+            (cd "$published_dir" && sha256sum --check "$PACKAGE.sha256")
+          else
+            gh release create "$GITHUB_REF_NAME" "$PACKAGE" "$PACKAGE.sha256" \
+              --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes "${release_flags[@]}"
+          fi
+
+      - name: Keep the latest published prerelease
+        if: contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          releases=$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          obsolete_ids=$(jq -er --arg current "$GITHUB_REF_NAME" '
+            [.[][] | select(.prerelease and (.draft | not))]
+            | if any(.[]; .tag_name == $current) then
+                sort_by(.published_at, .id) | .[:-1] | map(.id) | join("\n")
+              else
+                error("Published prerelease not found")
+              end
+          ' <<< "$releases")
+          while IFS= read -r release_id; do
+            [[ -n "$release_id" ]] || continue
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+          done <<< "$obsolete_ids"
